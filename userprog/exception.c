@@ -5,6 +5,7 @@
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 #include "intrinsic.h"
+#include "vm/vm.h"
 
 /* Number of page faults processed. */
 static long long page_fault_cnt;
@@ -144,12 +145,11 @@ page_fault (struct intr_frame *f) {
 	/* For project 3 and later. */
 	if (vm_try_handle_fault (f, fault_addr, user, write, not_present))
 		return;
+	else
 #endif
-
 	/* Count page faults. */
 	page_fault_cnt++;
 	
-	exit(-1);
 	/* If the fault is true fault, show info and exit. */
 	printf ("Page fault at %p: %s error %s page in %s context.\n",
 			fault_addr,
@@ -157,6 +157,8 @@ page_fault (struct intr_frame *f) {
 			write ? "writing" : "reading",
 			user ? "user" : "kernel");
 	// kill (f);
+	exit(-1);
+
 
 }
 

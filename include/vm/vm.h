@@ -2,6 +2,7 @@
 #define VM_VM_H
 #include <stdbool.h>
 #include "threads/palloc.h"
+#include "include/lib/kernel/hash.h"
 
 enum vm_type {
 	/* page not initialized */
@@ -35,7 +36,6 @@ struct page_operations;
 struct thread;
 
 #define VM_TYPE(type) ((type) & 7)
-
 /* The representation of "page".
  * This is kind of "parent class", which has four "child class"es, which are
  * uninit_page, file_page, anon_page, and page cache (project4).
@@ -44,15 +44,16 @@ struct page {
 	const struct page_operations *operations;
 	void *va;              /* Address in terms of user space */
 	struct frame *frame;   /* Back reference for frame */
-
+	bool writable;
 	/* Your implementation */
+	struct hash_elem hash_elem; /* Hash table element */
 
 	/* Per-type data are binded into the union.
 	 * Each function automatically detects the current union */
 	union {
-		struct uninit_page uninit;
-		struct anon_page anon;
-		struct file_page file;
+		struct uninit_page uninit; 	// 기본 값; uninit_page
+		struct anon_page anon;		// annoymous memory
+		struct file_page file;		// filed-backed memory
 #ifdef EFILESYS
 		struct page_cache page_cache;
 #endif
@@ -61,14 +62,16 @@ struct page {
 
 /* The representation of "frame" */
 struct frame {
-	void *kva;
+	void *kva;	// 커널 가상 주소
 	struct page *page;
+	struct list frame_elem;
 };
 
 /* The function table for page operations.
  * This is one way of implementing "interface" in C.
  * Put the table of "method" into the struct's member, and
  * call it whenever you needed. */
+/* 페이지 작업을 위한 함수 테이블 */
 struct page_operations {
 	bool (*swap_in) (struct page *, void *);
 	bool (*swap_out) (struct page *);
@@ -85,6 +88,7 @@ struct page_operations {
  * We don't want to force you to obey any specific design for this struct.
  * All designs up to you for this. */
 struct supplemental_page_table {
+	struct hash *pages;
 };
 
 #include "threads/thread.h"
@@ -108,5 +112,8 @@ bool vm_alloc_page_with_initializer (enum vm_type type, void *upage,
 void vm_dealloc_page (struct page *page);
 bool vm_claim_page (void *va);
 enum vm_type page_get_type (struct page *page);
+void page_destructor(struct hash_elem* hash_elem, void* aux);
 
+unsigned page_hash (const struct hash_elem *p_, void *aux UNUSED);
+bool page_less (const struct hash_elem *a_, const struct hash_elem *b_, void *aux UNUSED);
 #endif  /* VM_VM_H */

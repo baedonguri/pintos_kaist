@@ -61,6 +61,7 @@ pdpe_walk (uint64_t *pdpe, const uint64_t va, int create) {
  * on CREATE.  If CREATE is true, then a new page table is
  * created and a pointer into it is returned.  Otherwise, a null
  * pointer is returned. */
+/*uint64_t *pte = pml4e_walk (pml4, (uint64_t) upage, 1);*/
 uint64_t *
 pml4e_walk (uint64_t *pml4e, const uint64_t va, int create) {
 	uint64_t *pte = NULL;
