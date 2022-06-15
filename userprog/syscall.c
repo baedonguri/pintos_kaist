@@ -16,6 +16,7 @@
 #include "threads/vaddr.h"
 #include "userprog/process.h"
 #include "threads/synch.h"
+#include "include/vm/vm.h"
 
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
@@ -76,16 +77,25 @@ syscall_init (void) {
 }
 
 /* helper functions letsgo ! */
-void check_address(const uint64_t* addr){
-   struct thread *t = thread_current(); // 변경사항
-   /* is_user_vaddr : 포인터가 가리키는 주소가 유저영역의 주소인지 확인
-    * pml4_get_page : 유저 가상 주소에 연결된 물리 주소를 반환하는 함수. 
-                      만약 포인터가 가리키는 주소가 매핑되지 않은 영역이면 NULL을 반환함 */
-
+void check_address(const uint64_t *uaddr){
+	struct thread *cur = thread_current();
+#ifndef VM
+    /* is_user_vaddr : 포인터가 가리키는 주소가 유저영역의 주소인지 확인
+     * pml4_get_page : 유저 가상 주소에 연결된 물리 주소를 반환하는 함수. 
+                       만약 포인터가 가리키는 주소가 매핑되지 않은 영역이면 NULL을 반환함 */
    /* 잘못된 접근인 경우, 프로세스 종료 */
-   if (!is_user_vaddr(addr) || addr == NULL || pml4_get_page(t->pml4, addr) == NULL)
-      exit(-1);
-} 
+	if (uaddr == NULL || !(is_user_vaddr(uaddr)) || pml4_get_page(cur->pml4, uaddr) == NULL)
+	{
+		exit(-1);
+	}
+#else
+	if (uaddr == NULL || !(is_user_vaddr(uaddr)) || spt_find_page(&cur->spt, uaddr) == NULL)
+	{
+		exit(-1);
+	}
+#endif
+}
+
 
 /* 현재 쓰레드의 FDT테이블에서 첫번째 빈공간을 찾아 파일 객체를 추가해주는 함수 */
 int process_add_file(struct file *f){

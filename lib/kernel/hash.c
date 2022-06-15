@@ -21,16 +21,18 @@ static void rehash (struct hash *);
 
 /* Initializes hash table H to compute hash values using HASH and
    compare hash elements using LESS, given auxiliary data AUX. */
+/* 해쉬 초기화 함수, 
+ * hash_hash_func : 요소 데이터의 해쉬를  */
 bool
 hash_init (struct hash *h,
 		hash_hash_func *hash, hash_less_func *less, void *aux) {
 	h->elem_cnt = 0;
 	h->bucket_cnt = 4;
 	h->buckets = malloc (sizeof *h->buckets * h->bucket_cnt);
-	h->hash = hash;
-	h->less = less;
+	h->hash = hash;		// hash 함수
+	h->less = less;		// 비교함수 
 	h->aux = aux;
-
+	// 만약 메모리가 할당되지 않다면 false
 	if (h->buckets != NULL) {
 		hash_clear (h, NULL);
 		return true;
@@ -288,7 +290,6 @@ find_bucket (struct hash *h, struct hash_elem *e) {
 static struct hash_elem *
 find_elem (struct hash *h, struct list *bucket, struct hash_elem *e) {
 	struct list_elem *i;
-
 	for (i = list_begin (bucket); i != list_end (bucket); i = list_next (i)) {
 		struct hash_elem *hi = list_elem_to_hash_elem (i);
 		if (!h->less (hi, e, h->aux) && !h->less (e, hi, h->aux))

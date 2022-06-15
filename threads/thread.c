@@ -11,8 +11,10 @@
 #include "threads/synch.h"
 #include "threads/vaddr.h"
 #include "intrinsic.h"
+#include "vm/vm.h"
 #ifdef USERPROG
 #include "userprog/process.h"
+// #ifdef VM
 #endif
 
 /* Random value for struct thread's `magic' member.
