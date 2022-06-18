@@ -37,6 +37,8 @@ void close(int fd);
 tid_t fork (const char *thread_name);
 int exec (const char *file_name);
 int dup2(int oldfd, int newfd);
+void *mmap (void *addr, size_t length, int writable, int fd, off_t offset);
+
 
 /* syscall helper functions */
 void check_address(const uint64_t*);
@@ -78,18 +80,18 @@ syscall_init (void) {
 
 /* helper functions letsgo ! */
 void check_address(const uint64_t *uaddr){
-	struct thread *cur = thread_current();
+	struct thread *t = thread_current();
 #ifndef VM
     /* is_user_vaddr : 포인터가 가리키는 주소가 유저영역의 주소인지 확인
      * pml4_get_page : 유저 가상 주소에 연결된 물리 주소를 반환하는 함수. 
                        만약 포인터가 가리키는 주소가 매핑되지 않은 영역이면 NULL을 반환함 */
    /* 잘못된 접근인 경우, 프로세스 종료 */
-	if (uaddr == NULL || !(is_user_vaddr(uaddr)) || pml4_get_page(cur->pml4, uaddr) == NULL)
+	if (uaddr == NULL || !(is_user_vaddr(uaddr)) || pml4_get_page(t->pml4, uaddr) == NULL)
 	{
 		exit(-1);
 	}
 #else
-	if (uaddr == NULL || !(is_user_vaddr(uaddr)) || spt_find_page(&cur->spt, uaddr) == NULL)
+	if (uaddr == NULL || !is_user_vaddr(uaddr))
 	{
 		exit(-1);
 	}
@@ -112,6 +114,7 @@ int process_add_file(struct file *f){
    return -1;
 }
 
+/* 프로세스의 FDT 목록을 검색하여 파일 객체의 주소 리턴 */
 struct file *process_get_file (int fd){
    if (fd < 0 || fd >= FDCOUNT_LIMIT)
       return NULL;
@@ -133,6 +136,19 @@ void
 syscall_handler (struct intr_frame *f UNUSED) {
    // TODO: Your implementation goes here.
    int syscall_num = f->R.rax; // rax: system call number
+   ASSERT(is_user_vaddr(f->rsp));
+   /* project3 stack growth */
+   struct thread *t = thread_current();
+   t->stack_rsp = f->rsp;
+
+		/* 인자가 들어오는 순서 : 
+		   1번째 인자 : %rdi
+		   2번째 인자 : %rsi
+		   3번째 인자 : %rdx
+		   4번째 인자 : %r10
+		   5번째 인자 : %r8
+		   6번째 인자 : %r9 */
+
    switch(syscall_num){
       case SYS_HALT:                   /* Halt the operating system. */
          halt();
@@ -180,6 +196,11 @@ syscall_handler (struct intr_frame *f UNUSED) {
          break;
       case SYS_CLOSE:                /* Close a file. */
          close(f->R.rdi);
+         break;
+      case SYS_MMAP:
+         mmap(f->R.rdi, f->R.rsi, f->R.rdx, f->R.r10, f->R.r8);
+         break;
+      case SYS_MUNMAP:
          break;
       case SYS_DUP2:
          f->R.rax = dup2(f->R.rdi, f->R.rsi);
@@ -270,18 +291,20 @@ int filesize (int fd){
    return file_length(f);
 }
 /* 해당 파일로부터 값을 읽고, 버퍼에 넣는 시스템콜 */
-int read (int fd, void *buffer, unsigned size){
+int read (int fd, void *buffer,unsigned size){
    check_address(buffer);
-   unsigned char *buf = buffer;
    int readsize;
    struct thread *curr = thread_current();
 
+   // project3 - stack growth
+#ifdef VM
+   struct page *page = spt_find_page(&curr->spt, buffer);
+   if (page && !page->writable) exit(-1); 
+#endif
    struct file *f = process_get_file(fd);
-
-   if (f == NULL) return -1;
+   if (f == NULL || f == STDOUT) return -1;
    // if (fd < 0 || fd>= FDCOUNT_LIMIT) return NULL;
-   if (f == STDOUT) return -1;
-   
+   // if (f == STDOUT) return -1;
    if (f == STDIN){
       if (curr->stdin_count == 0){
          NOT_REACHED();
@@ -290,12 +313,15 @@ int read (int fd, void *buffer, unsigned size){
       }
       else {
          // fd가 0일 경우 키보드 입력을 받아온다
-         for (readsize = 0; readsize < size; readsize++){
+         int i;
+         unsigned char *buf = buffer;
+         for (i=0; i < size; i++){
             char c = input_getc();
             *buf++ = c;
             if (c == '\0')
                break;
          }
+         readsize = i;
       }
    }
    else{
@@ -392,7 +418,7 @@ int dup2(int oldfd, int newfd)
 	struct thread *cur = thread_current();
 	struct file **fdt = cur->file_descriptor_table;
 
-	if (file_fd == STDIN) {
+   if (file_fd == STDIN) {
       cur->stdin_count++;
    }
    else if (file_fd == STDOUT) {
@@ -405,4 +431,29 @@ int dup2(int oldfd, int newfd)
    close(newfd);
    fdt[newfd] = file_fd;
    return newfd;
+}
+
+void *mmap (void *addr, size_t length, int writable, int fd, off_t offset)
+{
+   /* 파일의 시작점이 페이지 정렬이 되지 않았을 경우  */
+   if (offset%PGSIZE != 0){
+      return NULL;
+   }
+   struct file *file = process_get_file(fd);
+   
+   /* file이 제대로 열리지 않았을 경우, file의 길이가 0인 경우 */
+   if (file == NULL || file_length(file) == 0){
+      return NULL;
+   }
+   /* addr가 0인 경우, length가 0인 경우 */
+   if (addr == 0x0| length == 0){
+      return NULL;
+   }
+   
+   return do_mmap(addr, length, writable, file, offset);
+}
+
+void munmap (void *addr)
+{
+   return do_munmap(addr);
 }

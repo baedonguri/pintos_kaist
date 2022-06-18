@@ -492,6 +492,9 @@ static void init_thread (struct thread *t, const char *name, int priority) {
 	sema_init(&t->free_sema,0);
 
 	t->running = NULL;
+	// t->stack_bottom = NULL;
+	t->stack_rsp = NULL;
+
 	/* --- Project2: User programs - system call --- */
 	
 }

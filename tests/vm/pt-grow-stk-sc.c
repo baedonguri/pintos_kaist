@@ -13,9 +13,28 @@
 void
 test_main (void)
 {
+  // msg("============user_program===========\n");
+  void *ret;
+  // __asm __volatile( 			
+	// 		"mov %%rsp, %%rax\n"
+	// 		: "=a" (ret):: "cc", "memory");
+  // msg("rsp_ret: %p\n", ret);
   int handle;
+  // __asm __volatile( 			
+	// 		"mov %%rsp, %%rax\n"
+	// 		: "=a" (ret):: "cc", "memory");
+  // msg("rsp_handle: %p\n", ret);
   int slen = strlen (sample);
+  // __asm __volatile( 			
+	// 		"mov %%rsp, %%rax\n"
+	// 		: "=a" (ret):: "cc", "memory");
+  // msg("rsp_slen: %p\n", ret);
   char buf2[65536];
+  // __asm __volatile( 			
+	// 		"mov %%rsp, %%rax\n"
+	// 		: "=a" (ret):: "cc", "memory");
+  // msg("rsp_buf: %p\n", ret);
+  // msg("============user_program===========\n");
 
   /* Write file via write(). */
   CHECK (create ("sample.txt", slen), "create \"sample.txt\"");

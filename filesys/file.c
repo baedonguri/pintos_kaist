@@ -31,6 +31,8 @@ file_open (struct inode *inode) {
 
 /* Opens and returns a new file for the same inode as FILE.
  * Returns a null pointer if unsuccessful. */
+/* 파일 객체를 복제하여, 복제된 객체의 주소를 리턴 */
+/* close()되더라도 mmap()의 유효성을 유지하기 위해 파일 객체 복제 */
 struct file *
 file_reopen (struct file *file) {
 	return file_open (inode_reopen (file->inode));

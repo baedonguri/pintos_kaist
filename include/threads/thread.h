@@ -111,6 +111,7 @@ struct thread {
 	struct list_elem donation_elem;  	/* priority를 donate한 쓰레드들의 리스트를 관리하기 위한 element 
 										이 element를 통해 자신이 우선 순위를 donate한 쓰레드의 donates 리스트에 연결*/
 	
+	uintptr_t *stack_rsp;
 #ifdef USERPROG
 	/* Owned by userprog/process.c. */
 	uint64_t *pml4;                     /* Page map level 4 */
@@ -119,8 +120,7 @@ struct thread {
 	/* Table for whole virtual memory owned by thread. */
 	/* 스레드가 소유한 전체 가상 메모리에 대한 테이블입니다. */
 	struct supplemental_page_table spt;
-	void *stack_bottom;
-	void *rsp_stack;
+	// void *stack_bottom;
 #endif
 
 	/* Owned by thread.c. */
