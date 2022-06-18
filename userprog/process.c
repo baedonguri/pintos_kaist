@@ -18,18 +18,23 @@
 #include "threads/mmu.h"
 #include "threads/vaddr.h"
 #include "intrinsic.h"
+#include "userprog/syscall.h"
 #ifdef VM
 #include "vm/vm.h"
 #endif
+
+/* project2 extra */
+struct dict_elem{
+	uintptr_t key;
+	uintptr_t value;
+};
 
 static void process_cleanup (void);
 static bool load (const char *file_name, struct intr_frame *if_);
 static void initd (void *f_name);
 static void __do_fork (void *);
 void argument_stack(char **argv, int argc, struct intr_frame *_if);
-
-// tid_t process_execute (const char *file_name);
-// static void start_process (void *file_name_);
+struct thread * get_child (int pid);
 
 
 /* General process initializer for initd and other process. */
@@ -57,23 +62,27 @@ process_create_initd (const char *file_name) {
 		return TID_ERROR;
 	strlcpy (fn_copy, file_name, PGSIZE); // fn_copy 주소 공간에 file_name을 저장해 넣어주고, 4kb로 길이를 한정한다. (임의로 줌)
 
+	/* project2 : system call */
 	char *token, *save_ptr;
 	token = strtok_r(file_name, " ", &save_ptr);
+
 	/* Create a new thread to execute FILE_NAME. */
+	/* initd를 실행하고, 해당 파일 이름으로 쓰레드를 생성 */
+	/* initd()는 첫번쩨 유저 프로세스를 실헹하는 함수. 
+	 * 왜 첫번째냐면, 이후로는 fork를 통해 프로세스를 생성하면 되기 때문이다! */
 	tid = thread_create (token, PRI_DEFAULT, initd, fn_copy);
+	/* project2 : system call */
+
 	if (tid == TID_ERROR)
 		palloc_free_page (fn_copy);
 	return tid;
 }
 /* A thread function that launches first user process. */
+/* 첫번째 사용자 프로세스를 시작하는 쓰레드 함수 */
 static void
 initd (void *f_name) {
-#ifdef VM
-	supplemental_page_table_init (&thread_current ()->spt);
-#endif
-
 	process_init ();
-
+		
 	if (process_exec (f_name) < 0)
 		PANIC("Fail to launch initd\n");
 	NOT_REACHED ();
@@ -81,18 +90,36 @@ initd (void *f_name) {
 
 /* Clones the current process as `name`. Returns the new process's thread id, or
  * TID_ERROR if the thread cannot be created. */
+/* 현재 프로세스를 "name"으로 복제합니다. 새 프로세스의 TID를 반환합니다.
+* 스레드를 만들 수 없는 경우는 TID_ERROR. */
 tid_t
 process_fork (const char *name, struct intr_frame *if_ UNUSED) {
 	/* Clone current thread to new thread.*/
-	return thread_create (name,
-			PRI_DEFAULT, __do_fork, thread_current ());
+	struct thread *parent = thread_current(); // 현재 실행 중인 쓰레드!, 하지만 시스템콜로 인해 rsp는 커널 스택을 가리키고 있삼. 따라서 유저스택의 정보를 가지고 있지 않음
+	// memcpy(&parent->parent_if, if_, sizeof(struct intr_frame)); // 유저 스택의 정보(if_)를 부모의 인터럽트 프레임에 넣어주기
+
+	tid_t tid = thread_create(name, PRI_DEFAULT, __do_fork, parent); // 전달 받은 thread_name으로 __do_fork()를 진행, thread_current를 줘서 같은 rsi를 공유하게 함.
+	if (tid == TID_ERROR) {
+		return TID_ERROR;
+	}
+	// 부모프로세스는 thread_create의 리턴값으로 받은 tid를 가지고 자식 프로세스를 찾는다.
+	struct thread *child = get_child(tid);
+	// 해당 자식의 fork_sema를 down
+	sema_down(&child->fork_sema);
+	// 이 과정은 자식 프로세스의 정상적인 load를 위한 것으로
+	// 자식 프로세스는 __do_fork()를 통해 부모 프로세스의 정보를 모두 복사한 뒤, sema_up을 해 세마포어를 해제!
+	if (child->exit_status == -1){
+		return TID_ERROR;
+	}
+	return tid;
 }
 
 #ifndef VM
 /* Duplicate the parent's address space by passing this function to the
  * pml4_for_each. This is only for the project 2. */
+/* 부모의 page table을 복제하기 위해 page table을 생성한다. */
 static bool
-duplicate_pte (uint64_t *pte, void *va, void *aux) {
+duplicate_pte (uint64_t *pte, void *va, void *aux) { // pte : 
 	struct thread *current = thread_current ();
 	struct thread *parent = (struct thread *) aux;
 	void *parent_page;
@@ -100,21 +127,36 @@ duplicate_pte (uint64_t *pte, void *va, void *aux) {
 	bool writable;
 
 	/* 1. TODO: If the parent_page is kernel page, then return immediately. */
-
+	/* 1. 부모의 page가 kernel page인 경우 즉시 false를 리턴 */
+	if (is_kernel_vaddr(va))
+		return true;
 	/* 2. Resolve VA from the parent's page map level 4. */
-	parent_page = pml4_get_page (parent->pml4, va);
-
+	/* 2. 부모쓰레드 내 멤버인 pml4를 이용해 부모 페이지를 불러온다.*/
+	parent_page =  pml4_get_page (parent->pml4, va);
+	if (parent_page == NULL) {
+		return false;
+	}
 	/* 3. TODO: Allocate new PAL_USER page for the child and set result to
 	 *    TODO: NEWPAGE. */
-
+	/* 3. 새로운 PAL_USER 페이지를 할당하고 newpage에 저장한다. */
+	newpage = palloc_get_page(PAL_USER);
+	if (newpage == NULL){
+		return false;
+	}
 	/* 4. TODO: Duplicate parent's page to the new page and
 	 *    TODO: check whether parent's page is writable or not (set WRITABLE
 	 *    TODO: according to the result). */
+	/* 4. 부모페이지를 복사해, 3에서 새로 할당받은 페이지에 넣어준다.
+	 * 	  이때 부모 페이지가 wriable인지 아닌지 확인한다. */
+	memcpy(newpage, parent_page, PGSIZE);
+	writable = is_writable(pte);
 
 	/* 5. Add new page to child's page table at address VA with WRITABLE
 	 *    permission. */
+	/* 페이지 생성에 실패하면 에러 핸들링이 동작하도록 false를 리턴한다.*/
 	if (!pml4_set_page (current->pml4, va, newpage, writable)) {
 		/* 6. TODO: if fail to insert page, do error handling. */
+		return false;
 	}
 	return true;
 }
@@ -124,17 +166,29 @@ duplicate_pte (uint64_t *pte, void *va, void *aux) {
  * Hint) parent->tf does not hold the userland context of the process.
  *       That is, you are required to pass second argument of process_fork to
  *       this function. */
+/*
+	부모 프로세스의 실행 context를 복사하는 스레드 함수다.
+	힌트: parent->tf (부모 프로세스 구조체 내 인터럽트 프레임 멤버)는 프로세스의 userland context 정보를 들고 있지 않다. 
+	즉, 당신은 process_fork()의 두번째 인자를 이 함수에 넘겨줘야만 한다.
+*/
+/* 부모 프로세스의 내용을 자식 프로세스로 복사하는 함수 */
 static void
 __do_fork (void *aux) {
 	struct intr_frame if_;
+	/* process_fork에서 전달받은 쓰레드, 즉 부모쓰레드 */ 
 	struct thread *parent = (struct thread *) aux;
-	struct thread *current = thread_current ();
+	/* process_fork에서 생성한 쓰레드, 즉 자식 프로세스 */
+	struct thread *current = thread_current();
 	/* TODO: somehow pass the parent_if. (i.e. process_fork()'s if_) */
 	struct intr_frame *parent_if;
 	bool succ = true;
 
+	parent_if = &parent->parent_if; // 유저 스택의 정보(if_)를 부모의 인터럽트 프레임에 넣어주기
+
 	/* 1. Read the cpu context to local stack. */
-	memcpy (&if_, parent_if, sizeof (struct intr_frame));
+	memcpy (&if_, parent_if, sizeof (struct intr_frame)); // 자식의 인터럽트 프레임에 부모의 인터럽트 프레임을 복사해줌
+	if_.R.rax = 0; // 자식의 PID 리턴값은 0
+	// current->running = file_duplicate(parent->running);
 
 	/* 2. Duplicate PT */
 	current->pml4 = pml4_create();
@@ -156,62 +210,98 @@ __do_fork (void *aux) {
 	 * TODO:       in include/filesys/file.h. Note that parent should not return
 	 * TODO:       from the fork() until this function successfully duplicates
 	 * TODO:       the resources of parent.*/
+	if (parent->fdidx == FDCOUNT_LIMIT) {
+		goto error;
+	}
+	const int DICTLEN = 10;
+	struct dict_elem dup_file_dict[10];
+	int dup_idx = 0;
+	
+	for(int i = 0; i < FDCOUNT_LIMIT; i++){
+		struct file *f = parent->file_descriptor_table[i];
+		if (f==NULL) continue;
+		bool is_exist = false;
+		for (int j = 0; j < DICTLEN; j++){
+			if (dup_file_dict[j].key == f){
+				current->file_descriptor_table[i] = dup_file_dict[j].value;
+				is_exist = true;
+				break;
+			}
+		}
+		if (is_exist)
+			continue;
+		
+		struct file *new_f;
+		if (f>2)
+			new_f = file_duplicate(f);
+		else
+			new_f = f;
 
-	process_init ();
+		current->file_descriptor_table[i] = new_f;
 
+		if(dup_idx<DICTLEN){
+			dup_file_dict[dup_idx].key = f;
+			dup_file_dict[dup_idx].value = new_f;
+			dup_idx ++;
+		}
+	}
+
+	current->fdidx = parent->fdidx;
+	
+	sema_up(&current->fork_sema);
+
+	// process_init ();
 	/* Finally, switch to the newly created process. */
 	if (succ)
-		do_iret (&if_);
+		do_iret (&if_); // 부모로부터 복사한 인터럽트 프레임을를 레지스터에 담는 작업
 error:
-	thread_exit ();
+	current->exit_status = TID_ERROR;
+	sema_up(&current->fork_sema);
+	exit(TID_ERROR);
+	// thread_exit ();
 }
 
 /* Switch the current execution context to the f_name.
  * Returns -1 on fail. */
-/* 현재 실행되고 있는 사용자 프로세스를 새 실행 파일의 프로세스로 스위칭한다. */
-/* 현재 실행 중인 쓰레드의 context를 f_name에 해당하는 명령을 실행하기 위해 context switching.*/
+/* 유저가 입력한 명령어를 수행하도록 프로그램을 메모리에 적재하고 실행하는 함수.*/
 int
-process_exec (void *f_name) { // 유저가 입력한 명령어를 수행하도록 프로그램을 메모리에 적재하고 실행하는 함수. 여기에 파일 네임 인자로 받아서 저장(문자열) => 근데 실행 프로그램 파일과 옵션이 분리되지 않은 상황.
+process_exec (void *f_name) {
    char *file_name = f_name; // f_name은 문자열인데 위에서 (void *)로 넘겨받음! -> 문자열로 인식하기 위해서 char * 로 변환해줘야.
-
    bool success;
 
-   char file_name_address[128]; // 스택에 저장
-   // file_name_address = palloc_get_page(PAL_USER); // 이렇게는 가능 but 비효율적
+	/* 유저 프로세스 작업을 수행하기 위해 intr_frame 내 구조체 멤버에 필요한 정보를 담는다. */
+   struct intr_frame _if;
+   _if.ds = _if.es = _if.ss = SEL_UDSEG;   	// data_segment, more_data_seg, stack_seg
+   _if.cs = SEL_UCSEG;                 		// code_segment
+   _if.eflags = FLAG_IF | FLAG_MBS;      	// cpu_flag
+											// SEL_UDSEG : 유저 메모리 데이터 선택자, 유저 메모리에 있는 데이터 세그먼트를 가리키는 주소값.
+											// SEL_UCSEG : 유저 메모리 코드 선택자, 유저 메모리에 있는 코드 세그먼트를 가리키는 주소값
 
-   memcpy(file_name_address, file_name, strlen(file_name)+1); // strlen에 +1? => 원래 문자열에는 \n이 들어가는데 strlen에서는 \n 앞까지만 읽고 끝내기 때문. 전체를 들고오기 위해 +1
-
-   /* We cannot use the intr_frame in the thread structure.
-    * This is because when current thread rescheduled,
-    * it stores the execution information to the member. */
-   struct intr_frame _if; // intr_frame 내 구조체 멤버에 필요한 정보를 담는다.
-   _if.ds = _if.es = _if.ss = SEL_UDSEG;   // data_segment, more_data_seg, stack_seg
-   _if.cs = SEL_UCSEG;                  // code_segment
-   _if.eflags = FLAG_IF | FLAG_MBS;      // cpu_flag
-
-   /* We first kill the current context */
    process_cleanup ();
+#ifdef VM
+	supplemental_page_table_init (&thread_current ()->spt);
+#endif
    // 새로운 실행 파일을 현재 스레드에 담기 전에 먼저 현재 process에 담긴 context를 지워준다.
    // 지운다? => 현재 프로세스에 할당된 page directory를 지운다는 뜻.
    // context switch를 할때 위에서 저장한 _if로 원복하면서 돌아옴
-
    /* And then load the binary */
    success = load (file_name, &_if); // file_name, _if를 현재 프로세스에 load.
-   // success는 bool type이니까 load에 성공하면 1, 실패하면 0 반환.
-   // 이때 file_name: f_name의 첫 문자열을 parsing하여 넘겨줘야 한다!
+   // load에 성공하면 1, 실패하면 0
+//    palloc_free_page(file_name);
 
    if (!success){
-      return -1;
+	   palloc_free_page(file_name);
+	   return -1;
    }
 
    // 디버깅을 위한 툴
-   hex_dump(_if.rsp, _if.rsp, USER_STACK - _if.rsp, true); // 유저 스택에 담기는 값을 확인함. 메모리 안에 있는 걸 16진수로 값을 보여줌
+//    hex_dump(_if.rsp, _if.rsp, USER_STACK - _if.rsp, true); // 유저 스택에 담기는 값을 확인함. 메모리 안에 있는 걸 16진수로 값을 보여줌
 
    /* If load failed, quit. */
    // palloc_free_page (file_name); // file_name: 프로그램 파일 받기 위해 만든 임시변수. 따라서 load 끝나면 메모리 반환.
 
    /* Start switched process. */
-   do_iret (&_if);	// 만약 load가 실행되었다면 context_switching을 진행
+   do_iret (&_if);	// 유저 프로세스로 CPU를 넘김
    NOT_REACHED ();
 }
 
@@ -234,12 +324,22 @@ process_wait (tid_t child_tid UNUSED) {
 	 * XXX:       to add infinite loop here before
 	 * XXX:       implementing the process_wait. */
 	/* 자식 프로세스가 실행되는 것을 기다렸다가 자식 프로세스가 종료되면 
-	* 그 시그널을 받아 부모 스레드가 종료해야 하는데, 
-	* 그냥 바로 종료되어 버리므로 자식 프로세스가 실행되지 못한다  
-	* 무한 루프로 자식 프로세스가 실행될 수 있도록 함. */
+	* 그 시그널을 받아 부모 스레드가 종료해야 함 */
 
-	for (int i = 0; i < 100000000; i++);
-	return -1;
+	// for (int i = 0; i < 100000000; i++);
+	// return -1;
+	struct thread *child = get_child(child_tid);
+	if (child == NULL)
+		return -1;
+
+	sema_down(&child->wait_sema);
+
+	int exit_status = child->exit_status;
+	
+	list_remove(&child->child_elem);
+	sema_up(&child->free_sema);
+	
+	return exit_status;
 }
 
 /* Exit the process. This function is called by thread_exit (). */
@@ -250,8 +350,21 @@ process_exit (void) {
 	 * TODO: Implement process termination message (see
 	 * TODO: project2/process_termination.html).
 	 * TODO: We recommend you to implement process resource cleanup here. */
+	for (int i = 0; i < FDCOUNT_LIMIT; i++){
+		close(i);
+	}
+	palloc_free_multiple(curr->file_descriptor_table, FDT_PAGES);
 
-	process_cleanup ();
+	if (curr->running != NULL){
+		file_close(curr->running);
+	}
+	
+	process_cleanup();
+
+	sema_up(&curr->wait_sema);
+	
+	sema_down(&curr->free_sema);
+	// process_cleanup ();
 }
 
 /* Free the current process's resources. */
@@ -283,6 +396,7 @@ process_cleanup (void) {
 
 /* Sets up the CPU for running user code in the nest thread.
  * This function is called on every context switch. */
+/* page directory를 CPU의 레지스터로 올려주는 역할 */
 void
 process_activate (struct thread *next) {
 	/* Activate thread's page tables. */
@@ -313,32 +427,37 @@ process_activate (struct thread *next) {
 
 /* Executable header.  See [ELF1] 1-4 to 1-8.
  * This appears at the very beginning of an ELF binary. */
+/* https://pu1et-panggg.tistory.com/32 */
 struct ELF64_hdr {
-	unsigned char e_ident[EI_NIDENT];
-	uint16_t e_type;
-	uint16_t e_machine;
-	uint32_t e_version;
-	uint64_t e_entry;
-	uint64_t e_phoff;
-	uint64_t e_shoff;
-	uint32_t e_flags;
-	uint16_t e_ehsize;
-	uint16_t e_phentsize;
-	uint16_t e_phnum;
-	uint16_t e_shentsize;
-	uint16_t e_shnum;
-	uint16_t e_shstrndx;
+	unsigned char e_ident[EI_NIDENT]; 	// 매직넘버 등 파일의 내용을 해석하고 디코딩하기 위해 필요한 정보들
+	uint16_t e_type;					// 오브젝트 파일 타입
+	uint16_t e_machine;					// 아키텍쳐
+	uint32_t e_version;					// 오브젝트 파일 버전
+	uint64_t e_entry;					// Entry point virtual address
+	uint64_t e_phoff;					// 프로그램 헤더 테이블 file offset
+	uint64_t e_shoff;					// 섹션 헤더 테이블 file offset
+	uint32_t e_flags;					// 프로세서 관련 플래그
+	uint16_t e_ehsize;					// ELF 헤더 사이즈 (byte)
+	uint16_t e_phentsize;				// 프로그램 헤더 테이블 Entry 크기
+	uint16_t e_phnum;					// 프로그램 헤더 Entry 갯수
+	uint16_t e_shentsize;				// 섹션 헤더 테이블 Entry 크기
+	uint16_t e_shnum;					// 섹션 헤더 테이블 Entry 갯수
+	uint16_t e_shstrndx;				// 섹션 헤더 string 테이블 index
 };
 
+/* 프로그램 헤더 테이블은 ELF헤더의 e_phoff로 지정된 오프셋에서 시작하고 
+ * e_phentsize와 e_phnum으로 정해진 크기를 갖는 테이블이다. 
+ * 프로그램 헤더 테이블의 전체 크기 = e_phnum * e_phentsize (byte)
+*/
 struct ELF64_PHDR {
-	uint32_t p_type;
-	uint32_t p_flags;
-	uint64_t p_offset;
-	uint64_t p_vaddr;
-	uint64_t p_paddr;
-	uint64_t p_filesz;
-	uint64_t p_memsz;
-	uint64_t p_align;
+	uint32_t p_type;				// 세그먼트 타입
+	uint32_t p_flags;				// 세그먼트 플래그
+	uint64_t p_offset;				// 세그먼트 파일 오프셋
+	uint64_t p_vaddr;				// 세그먼트 가상 주소
+	uint64_t p_paddr;				// 세그먼트 물리 주소
+	uint64_t p_filesz;				// 파일에서 세그먼트 크기
+	uint64_t p_memsz;				// 메모리에서 세그먼트 크기
+	uint64_t p_align;				// 세그먼트 alignment
 };
 
 /* Abbreviations */
@@ -366,19 +485,15 @@ load (const char *file_name, struct intr_frame *if_) {
 	int i;
 
 	/* Project 2: Command_line_parsing */
-	char *arg_list[128];
+	/* */
+	char *argv[64];
 	char *token, *save_ptr;
-	int arg_cnt = 0;
-
-	token = strtok_r(file_name, " ", &save_ptr); 
-	arg_list[arg_cnt] = token;
-
-	while (token != NULL) {
-		token = strtok_r(NULL, " ", &save_ptr); // NULL이면 strtok_r 내부에서 NULL의 다음 칸, 즉 다음 문자가 시작하는 위치를 가리켜줌
-		arg_cnt++;
-		arg_list[arg_cnt] = token;
+	int argc = 0;
+	for (token=strtok_r(file_name, " ", &save_ptr); token != NULL; token = strtok_r(NULL, " ", &save_ptr)) {
+		argv[argc] = token;
+		argc++;
 	}
-	
+
 	/* Allocate and activate page directory. */
 	t->pml4 = pml4_create ();	// 페이지 디렉토리 생성
 	if (t->pml4 == NULL)
@@ -391,6 +506,9 @@ load (const char *file_name, struct intr_frame *if_) {
 		printf ("load: %s: open failed\n", file_name);
 		goto done;
 	}
+	// /* project3 - Annoymous file */
+	t->running = file;
+	file_deny_write(file); // 현재 오픈한 파일에 다른 내용을 쓰지 못하게 막기
 
 	/* Read and verify executable header. */
 	/* ELF파일의 헤더 정보를 읽어와 저장 */
@@ -432,8 +550,8 @@ load (const char *file_name, struct intr_frame *if_) {
 			case PT_LOAD:
 				if (validate_segment (&phdr, file)) {
 					bool writable = (phdr.p_flags & PF_W) != 0;
-					uint64_t file_page = phdr.p_offset & ~PGMASK;
-					uint64_t mem_page = phdr.p_vaddr & ~PGMASK;
+					uint64_t file_page = phdr.p_offset & ~PGMASK; // 파일의 위치 가져오기
+					uint64_t mem_page = phdr.p_vaddr & ~PGMASK;	  // 파일을 저장할 메모리의 virutal address
 					uint64_t page_offset = phdr.p_vaddr & PGMASK;
 					uint32_t read_bytes, zero_bytes;
 					if (phdr.p_filesz > 0) {
@@ -458,7 +576,6 @@ load (const char *file_name, struct intr_frame *if_) {
 				break;
 		}
 	}
-
 	/* Set up stack. */
 	if (!setup_stack (if_))
 		goto done;
@@ -467,13 +584,13 @@ load (const char *file_name, struct intr_frame *if_) {
 	if_->rip = ehdr.e_entry;
 
 	/* project2 : command parsing line */
-	argument_stack(arg_list, arg_cnt, if_);
+	argument_stack(argv, argc, if_);
 
 	success = true;
 
 done:
 	/* We arrive here whether the load is successful or not. */
-	file_close (file);
+	// file_close (file);
 	return success;
 }
 
@@ -544,6 +661,7 @@ static bool install_page (void *upage, void *kpage, bool writable);
  *
  * Return true if successful, false if a memory allocation error
  * or disk read error occurs. */
+/* 프로세스 가상 주소 공간에 코드 세그먼트를 매핑하는 과정 */
 static bool
 load_segment (struct file *file, off_t ofs, uint8_t *upage,
 		uint32_t read_bytes, uint32_t zero_bytes, bool writable) {
@@ -557,9 +675,10 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 		 * We will read PAGE_READ_BYTES bytes from FILE
 		 * and zero the final PAGE_ZERO_BYTES bytes. */
 		size_t page_read_bytes = read_bytes < PGSIZE ? read_bytes : PGSIZE;
-		size_t page_zero_bytes = PGSIZE - page_read_bytes;
-
+		size_t page_zero_bytes = PGSIZE - page_read_bytes;		
+		
 		/* Get a page of memory. */
+		/* 메모리를 할당 받은 후, kpage에 저장 */
 		uint8_t *kpage = palloc_get_page (PAL_USER);
 		if (kpage == NULL)
 			return false;
@@ -572,6 +691,8 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 		memset (kpage + page_read_bytes, 0, page_zero_bytes);
 
 		/* Add the page to the process's address space. */
+		/* 프로세스의 주소 공간에 페이지를 추가하는 작업 */
+		/* 즉, virtual adress에 연결시켜주는 것. install_page에서 매핑해줌 */
 		if (!install_page (upage, kpage, writable)) {
 			printf("fail\n");
 			palloc_free_page (kpage);
@@ -581,6 +702,7 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 		/* Advance. */
 		read_bytes -= page_read_bytes;
 		zero_bytes -= page_zero_bytes;
+		ofs += page_read_bytes;
 		upage += PGSIZE;
 	}
 	return true;
@@ -597,6 +719,7 @@ setup_stack (struct intr_frame *if_) {
 	if (kpage != NULL) {
 		success = install_page (((uint8_t *) USER_STACK) - PGSIZE, kpage, true);
 		if (success)
+			// 스택 포인터를 유저 스택으로 보내준다.
 			if_->rsp = USER_STACK; 
 		else
 			palloc_free_page (kpage);
@@ -616,7 +739,6 @@ setup_stack (struct intr_frame *if_) {
 static bool
 install_page (void *upage, void *kpage, bool writable) {
 	struct thread *t = thread_current ();
-
 	/* Verify that there's not already a page at that virtual
 	 * address, then map our page there. */
 	/*해당 가상 주소에 페이지가 아직 없는지 확인한 다음 해당 페이지에 매핑합니다. */
@@ -633,22 +755,45 @@ lazy_load_segment (struct page *page, void *aux) {
 	/* TODO: Load the segment from the file */
 	/* TODO: This called when the first page fault occurs on address VA. */
 	/* TODO: VA is available when calling this function. */
+	// struct file* file = thread_current()->running;
+	struct segment *load_src = aux;
+ 	off_t offset = load_src->offset;
+    size_t page_read_bytes = load_src->page_read_bytes;
+    size_t page_zero_bytes = load_src->page_zero_bytes;
+	struct file* file = load_src->file;
+
+	file_seek(file, offset);
+	if (file_read(file, page->frame->kva, page_read_bytes) != (int)page_read_bytes) {
+		// palloc_free_page(page);
+		return false;
+	}
+
+	memset(page->frame->kva + page_read_bytes, 0, page_zero_bytes);
+	free(load_src);
+
+	return true;
 }
 
 /* Loads a segment starting at offset OFS in FILE at address
  * UPAGE.  In total, READ_BYTES + ZERO_BYTES bytes of virtual
  * memory are initialized, as follows:
+ * 주소 UPage의 FILE에서 오프셋 OFS에서 시작하는 세그먼트를 로드합니다.
+ * 총 가상 메모리의 READ_BYTS + ZERO_BYTS 바이트는 다음과 같이 초기화됩니다.
  *
  * - READ_BYTES bytes at UPAGE must be read from FILE
  * starting at offset OFS.
+ * UPage에서 READ_bytes 바이트는 오프셋 OFS에서 시작하는 FILE에서 읽어야 합니다.
  *
  * - ZERO_BYTES bytes at UPAGE + READ_BYTES must be zeroed.
+ *	UPAGE에서 ZERO_BYTS 바이트 + READ_BYTS를 0으로 설정해야 합니다.
  *
  * The pages initialized by this function must be writable by the
  * user process if WRITABLE is true, read-only otherwise.
+ * 이 기능으로 초기화된 페이지는 쓰기 가능이 참이면 사용자 프로세스에 의해 쓰기 가능해야 하며, 그렇지 않으면 읽기 전용이어야 합니다.
  *
  * Return true if successful, false if a memory allocation error
- * or disk read error occurs. */
+ * or disk read error occurs. 
+ * 성공하면 true를 반환하고 메모리 할당 오류가 발생하면 false를 반환합니다. 또는 디스크 읽기 오류가 발생합니다. */
 static bool
 load_segment (struct file *file, off_t ofs, uint8_t *upage,
 		uint32_t read_bytes, uint32_t zero_bytes, bool writable) {
@@ -664,30 +809,46 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 		size_t page_zero_bytes = PGSIZE - page_read_bytes;
 
 		/* TODO: Set up aux to pass information to the lazy_load_segment. */
-		void *aux = NULL;
-		if (!vm_alloc_page_with_initializer (VM_ANON, upage,
-					writable, lazy_load_segment, aux))
-			return false;
+		// TODO : 물리 페이지를 할당하고 맵핑하는 부분 삭제 
+		// TODO : page 생성 (malloc)
+		// TODO : page 멤버를 설정, 가상 페이지가 요구될 때, 읽어야할 파일의 오프셋과 사이즈, 마지막에 패딩할 제로 바이트 등등..
+		// TODO : insert_page() 함수를 사용해서 생성한 page_entry를 해시 테이블에 추가 
+		struct segment *seg = calloc(1, sizeof(struct segment));
+		seg->file = file;
+		seg->offset = ofs;
+		seg->page_read_bytes = page_read_bytes;
+		seg->page_zero_bytes = page_zero_bytes;
 
+		void *aux = seg;
+		if (!vm_alloc_page_with_initializer (VM_ANON, upage, writable, lazy_load_segment, aux)){
+			free(seg);
+			return false;
+		}
 		/* Advance. */
 		read_bytes -= page_read_bytes;
-		zero_bytes -= page_zero_bytes;
+		zero_bytes -= page_zero_bytes;		
+		ofs += page_read_bytes;
 		upage += PGSIZE;
 	}
 	return true;
 }
-
 /* Create a PAGE of stack at the USER_STACK. Return true on success. */
 static bool
 setup_stack (struct intr_frame *if_) {
 	bool success = false;
-	void *stack_bottom = (void *) (((uint8_t *) USER_STACK) - PGSIZE);
-
+	void *stack_bottom = (void *) (((uint8_t *) USER_STACK) - PGSIZE); // 시작점
+	// struct thread* t = thread_current();
 	/* TODO: Map the stack on stack_bottom and claim the page immediately.
 	 * TODO: If success, set the rsp accordingly.
-	 * TODO: You should mark the page is stack. */
+	 * TODO: You should mark the page is stack. */ // do_claim_frame -> initial
 	/* TODO: Your code goes here */
 
+	if (vm_alloc_page(VM_ANON | VM_MARKER_0, stack_bottom, 1)){
+		success = vm_claim_page(stack_bottom);
+		if (success){
+			if_->rsp = USER_STACK;
+		}
+	}
 	return success;
 }
 #endif /* VM */
@@ -729,12 +890,28 @@ void argument_stack(char **argv, int argc, struct intr_frame *if_) {
 		else // 나머지에는 arg_address에 있는 값 가져오기
 			memcpy(if_->rsp, &arg_address[i], sizeof(char **));
 	}
+	if_->R.rsi = if_->rsp;
+	if_->R.rdi = argc;
 	// 4. Return address
 	/* stack의 맨 위(top)에 Caller 함수의 다음 명령어의 주소. Return Address를 삽입한다.
 	 * 다만, 현재 Caller는 사용자 프로세스는 바로 종료되어야 하므로, 그 주소를 NULL pointer인 0으로 넣어준다. */
 	if_->rsp -= 8 ;
 	memset(if_->rsp, 0, sizeof(void *));
 
-	if_->R.rdi = argc;
-	if_->R.rsi = if_->rsp + 8; //fake_address 바로 위: arg_address 맨 앞 가리키는 주소값!
+	// if_->R.rdi = argc;
+	// if_->R.rsi = if_->rsp + 8; //fake_address 바로 위: arg_address 맨 앞 가리키는 주소값!
+}
+
+/* child_list를 순회하며 pid와 일치하는 자식 쓰레드를 찾은 뒤 해당 자식 쓰레드를 반환 */
+struct thread * get_child (int pid)
+{
+	struct thread *curr = thread_current();	// 부모 쓰레드
+	struct list *curr_child_list = &curr->child_list;	// 부모의 자식 리스트
+	struct list_elem *e;
+	for (e = list_begin(curr_child_list); e != list_end(curr_child_list); e = list_next(e)) {
+		struct thread *now = list_entry(e, struct thread, child_elem);
+		if (now->tid == pid)
+			return now;
+	}
+	return NULL;
 }

@@ -11,6 +11,7 @@
 #include "threads/vaddr.h"
 #include "devices/timer.h"
 #include "intrinsic.h"
+#include "userprog/exception.h"
 #ifdef USERPROG
 #include "userprog/gdt.h"
 #endif
@@ -338,6 +339,10 @@ intr_handler (struct intr_frame *frame) {
 	   We only handle one at a time (so interrupts must be off)
 	   and they need to be acknowledged on the PIC (see below).
 	   An external interrupt handler cannot sleep. */
+	   
+	// if ((frame->error_code & PF_U) != 0)
+	// 	thread_current()->stack_rsp = &frame->rsp;
+
 	external = frame->vec_no >= 0x20 && frame->vec_no < 0x30;
 	if (external) {
 		ASSERT (intr_get_level () == INTR_OFF);

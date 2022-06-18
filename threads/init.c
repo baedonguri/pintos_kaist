@@ -80,16 +80,16 @@ main (void) {
 
 	/* Initialize ourselves as a thread so we can use locks,
 	   then enable console locking. */
-	thread_init ();
+	thread_init (); // 쓰레드 초기화 및 커널 스택 포인터 위치 저장
 	console_init ();
 
 	/* Initialize memory system. */
-	mem_end = palloc_init ();
+	mem_end = palloc_init (); // 페이지 할당 초기화 작업 수행 및 쓸 수 있는 메모리가 얼마나 되는지 표시해줌
 	malloc_init ();
 	paging_init (mem_end);
 
 #ifdef USERPROG
-	tss_init ();
+	tss_init (); 
 	gdt_init ();
 #endif
 
@@ -178,7 +178,7 @@ read_command_line (void) {
 	int i;
 
 	argc = *(uint32_t *) ptov (LOADER_ARG_CNT);
-	p = ptov (LOADER_ARGS);	// 물리주소를 가상주소로 변환하기 위한 역할. 포인터의 시작위치를 반환
+	p = ptov (LOADER_ARGS);	// 물리주소를 가상주소로 변환하기 위한 역할. 물리주소에 KERN_BASE만큼 더해서 가상주소로 더해줌
 	end = p + LOADER_ARGS_LEN;	 // argument의 마지막 위치를 가리키는 포인터 (경계)
 	for (i = 0; i < argc; i++) {
 		if (p >= end)
@@ -197,7 +197,6 @@ read_command_line (void) {
 		else
 			printf (" '%s'", argv[i]);
 	printf ("\n");
-
 	return argv;
 }
 
@@ -238,14 +237,16 @@ parse_options (char **argv) {
 /* Runs the task specified in ARGV[1]. */
 static void
 run_task (char **argv) {
-	const char *task = argv[1]; // task = "echo x"
+	
+	const char *task = argv[1]; // argv[1] =  "args-single onearg", argv[0] = "run"
 
 	printf ("Executing '%s':\n", task);
 #ifdef USERPROG
 	if (thread_tests){
 		run_test (task);
-	} else { // thread1이 아니라면
-		process_wait (process_create_initd (task)); //
+	} else { 
+		// 프로세스를 하나 생성하고, 해당 프로세스가 종료되기를 기다림
+		process_wait (process_create_initd (task));
 	}
 #else
 	run_test (task);

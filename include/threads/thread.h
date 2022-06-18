@@ -1,10 +1,16 @@
 #ifndef THREADS_THREAD_H
 #define THREADS_THREAD_H
 
+#define FDT_PAGES 3
+#define FDCOUNT_LIMIT FDT_PAGES * (1<<9) // 3 * 512 (limit fdidx)
+										 // 페이지의 크기는 4KB(1<<12)인데, 파일 구조체 주소 크기가 8byte(1<<3)이므로, 
+										 // 이를 분리하면 512byte (1<<9)만큼의 공간을 할당받는 것과 같다.
+										 // 즉, 파일 구조체를 저장하기 위해 4KB만큼의 페이지 공간을 할당해주는 것이다.
 #include <debug.h>
 #include <list.h>
 #include <stdint.h>
 #include "threads/interrupt.h"
+#include "threads/synch.h"
 #ifdef VM
 #include "vm/vm.h"
 #endif
@@ -105,13 +111,16 @@ struct thread {
 	struct list_elem donation_elem;  	/* priority를 donate한 쓰레드들의 리스트를 관리하기 위한 element 
 										이 element를 통해 자신이 우선 순위를 donate한 쓰레드의 donates 리스트에 연결*/
 	
+	uintptr_t *stack_rsp;
 #ifdef USERPROG
 	/* Owned by userprog/process.c. */
 	uint64_t *pml4;                     /* Page map level 4 */
 #endif
 #ifdef VM
 	/* Table for whole virtual memory owned by thread. */
+	/* 스레드가 소유한 전체 가상 메모리에 대한 테이블입니다. */
 	struct supplemental_page_table spt;
+	// void *stack_bottom;
 #endif
 
 	/* Owned by thread.c. */
@@ -119,9 +128,24 @@ struct thread {
 	unsigned magic;                     /* Detects stack overflow. */
 
 	/* --- Project2: User programs - system call --- */
-	int exit_status; // exit(), wait() 구현 때 사용
 	struct file **file_descriptor_table; // FDF
 	int fdidx; // fd idx
+
+	struct list child_list;			// _fork(), wait() 구현 때 사용
+	struct list_elem child_elem; 	// _fork(), wait() 구현 때 사용
+	
+	int exit_status; // exit(), wait() 구현 때 사용
+
+
+	struct intr_frame parent_if;	// _fork() 구현 때 사용, __do_fork() 함수
+	struct semaphore fork_sema;
+	struct semaphore free_sema;
+	struct semaphore wait_sema;
+
+	struct file *running;
+
+	int stdin_count;
+	int stdout_count;
 };
 /* If false (default), use round-robin scheduler.
    If true, use multi-level feedback queue scheduler.
